@@ -29,7 +29,17 @@ npm run build
 npm run start
 ```
 
-For Zo Computer Hosting, use `scripts/zo-deploy.sh` as the deployment command after setting `OPENAI_API_KEY` and `EXA_API_KEY`.
+For Zo Computer Hosting, use this service command from the project directory:
+
+```bash
+bash scripts/zo-deploy.sh
+```
+
+To sync and rebuild without starting the server:
+
+```bash
+ZO_SYNC_ONLY=1 bash scripts/zo-deploy.sh
+```
 
 ## Environment
 
