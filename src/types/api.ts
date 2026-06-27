@@ -22,7 +22,7 @@ export interface DiscoveredPerson {
   title: string;
   company: string;
   url: string;
-  source: "exa" | "seed";
+  source: "exa";
   snippet: string;
   signals: string[];
 }
@@ -46,18 +46,8 @@ export interface OutreachDraft {
   followUp: string;
 }
 
-export interface SeedDemo {
-  profileText: string;
-  target: string;
-  parsedProfile: ParsedProfile;
-  discoveredPeople: DiscoveredPerson[];
-  rankedPaths: TrustPath[];
-  outreachDraft: OutreachDraft;
-}
-
 export interface ApiEnvelope<T> {
   data: T;
-  fallbackUsed: boolean;
   reason?: string;
 }
 

@@ -1,5 +1,4 @@
 import { useEffect, useMemo, useState } from "react";
-import { useQuery } from "@tanstack/react-query";
 import {
   ArrowRight,
   Check,
@@ -10,11 +9,9 @@ import {
   MessageSquare,
   Network,
   Radar,
-  Sparkles,
   Target,
   Users
 } from "lucide-react";
-import { seedDemo } from "./data/demo";
 import { api } from "./lib/api";
 import type {
   DiscoveredPerson,
@@ -48,9 +45,12 @@ function shortList(items: string[], max = 4) {
   return items.length > max ? `${visible} +${items.length - max}` : visible;
 }
 
-function statusText(fallbackUsed?: boolean, reason?: string) {
-  if (!fallbackUsed) return "Live signal complete.";
-  return reason ? reason.replace(/\.$/, "") : "Demo fallback used";
+function apiStatus(reason?: string) {
+  return reason ? reason.replace(/\.$/, "") : "Live signal complete";
+}
+
+function errorMessage(error: unknown) {
+  return error instanceof Error ? error.message : "Something went wrong.";
 }
 
 function ProgressRail({ activeStep }: { activeStep: number }) {
@@ -203,6 +203,8 @@ function BestPathPane({
   onRank: () => void;
   ranking: boolean;
 }) {
+  const riskText = selectedPath?.risks[0]?.trim() || "No explicit risk returned for this path.";
+
   return (
     <aside className="best-pane">
       <div className="section-head">
@@ -237,7 +239,7 @@ function BestPathPane({
             </div>
             <div>
               <span>Risk</span>
-              <p>{selectedPath.risks[0]}</p>
+              <p>{riskText}</p>
             </div>
           </div>
 
@@ -311,30 +313,16 @@ function DraftComposer({
 }
 
 export default function App() {
-  const seedQuery = useQuery({ queryKey: ["seed"], queryFn: api.getSeed });
-  const [profileText, setProfileText] = useState(seedDemo.profileText);
-  const [target, setTarget] = useState(seedDemo.target);
-  const [parsedProfile, setParsedProfile] = useState<ParsedProfile | null>(seedDemo.parsedProfile);
-  const [people, setPeople] = useState<DiscoveredPerson[]>(seedDemo.discoveredPeople);
-  const [paths, setPaths] = useState<TrustPath[]>(seedDemo.rankedPaths);
-  const [selectedPathId, setSelectedPathId] = useState<string | null>(seedDemo.rankedPaths[0]?.id ?? null);
-  const [draft, setDraft] = useState<OutreachDraft | null>(seedDemo.outreachDraft);
+  const [profileText, setProfileText] = useState("");
+  const [target, setTarget] = useState("");
+  const [parsedProfile, setParsedProfile] = useState<ParsedProfile | null>(null);
+  const [people, setPeople] = useState<DiscoveredPerson[]>([]);
+  const [paths, setPaths] = useState<TrustPath[]>([]);
+  const [selectedPathId, setSelectedPathId] = useState<string | null>(null);
+  const [draft, setDraft] = useState<OutreachDraft | null>(null);
   const [outcomes, setOutcomes] = useState<Record<string, OutcomeState>>(readOutcomes);
-  const [notice, setNotice] = useState("Seed demo data is ready.");
+  const [notice, setNotice] = useState("Paste a real profile and target, then run a live sprint.");
   const [loading, setLoading] = useState<"idle" | "parse" | "discover" | "rank" | "draft" | "sprint">("idle");
-
-  useEffect(() => {
-    if (!seedQuery.data) return;
-    const seed = seedQuery.data.data;
-    setProfileText(seed.profileText);
-    setTarget(seed.target);
-    setParsedProfile(seed.parsedProfile);
-    setPeople(seed.discoveredPeople);
-    setPaths(seed.rankedPaths);
-    setSelectedPathId(seed.rankedPaths[0]?.id ?? null);
-    setDraft(seed.outreachDraft);
-    setNotice(seedQuery.data.reason ?? "Seed demo data is ready.");
-  }, [seedQuery.data]);
 
   useEffect(() => {
     localStorage.setItem("zo.relationship.outcomes", JSON.stringify(outcomes));
@@ -353,36 +341,58 @@ export default function App() {
     try {
       const result = await api.parseProfile({ profileText });
       setParsedProfile(result.data);
-      setNotice(`Profile parsed. ${statusText(result.fallbackUsed, result.reason)}`);
+      setNotice(`Profile parsed. ${apiStatus(result.reason)}`);
       return result.data;
+    } catch (error) {
+      setNotice(`Profile parse failed: ${errorMessage(error)}`);
+      return null;
     } finally {
       setLoading("idle");
     }
   }
 
-  async function discoverTargets(profile = parsedProfile ?? seedDemo.parsedProfile) {
+  async function discoverTargets(profile = parsedProfile) {
+    if (!profile) {
+      setNotice("Parse a real profile before running discovery.");
+      return [];
+    }
     setLoading("discover");
     try {
       const result = await api.discoverTargets({ target, parsedProfile: profile });
       setPeople(result.data.results);
       setPaths([]);
       setDraft(null);
-      setNotice(`Discovery complete. ${statusText(result.fallbackUsed, result.reason)}`);
+      setSelectedPathId(null);
+      setNotice(
+        result.data.results.length
+          ? `Discovery complete. ${apiStatus(result.reason)}`
+          : "Discovery complete. No public people found for that target."
+      );
       return result.data.results;
+    } catch (error) {
+      setNotice(`Discovery failed: ${errorMessage(error)}`);
+      return [];
     } finally {
       setLoading("idle");
     }
   }
 
-  async function rankPaths(profile = parsedProfile ?? seedDemo.parsedProfile, discovered = people) {
+  async function rankPaths(profile = parsedProfile, discovered = people) {
+    if (!profile || !discovered.length) {
+      setNotice("Run live discovery before ranking trust paths.");
+      return [];
+    }
     setLoading("rank");
     try {
       const result = await api.rankTrustPaths({ target, parsedProfile: profile, discoveredPeople: discovered });
       setPaths(result.data.paths);
       setSelectedPathId(result.data.paths[0]?.id ?? null);
       setDraft(null);
-      setNotice(`Paths ranked. ${statusText(result.fallbackUsed, result.reason)}`);
+      setNotice(`Paths ranked. ${apiStatus(result.reason)}`);
       return result.data.paths;
+    } catch (error) {
+      setNotice(`Ranking failed: ${errorMessage(error)}`);
+      return [];
     } finally {
       setLoading("idle");
     }
@@ -394,27 +404,45 @@ export default function App() {
     try {
       const result = await api.draftOutreach({
         target,
-        parsedProfile: parsedProfile ?? seedDemo.parsedProfile,
+        parsedProfile: parsedProfile ?? undefined,
         selectedPath: path,
         tone: "warm, concise, non-desperate"
       });
       setDraft(result.data);
-      setNotice(`Draft ready. ${statusText(result.fallbackUsed, result.reason)}`);
+      setNotice(`Draft ready. ${apiStatus(result.reason)}`);
       return result.data;
+    } catch (error) {
+      setNotice(`Drafting failed: ${errorMessage(error)}`);
+      return null;
     } finally {
       setLoading("idle");
     }
   }
 
   async function runSprint() {
+    if (!profileText.trim() || !target.trim()) {
+      setNotice("Paste a real profile and enter a real target before running a sprint.");
+      return;
+    }
     setLoading("sprint");
     try {
+      setNotice("Live sprint running: parsing profile with OpenAI...");
       const parsed = await api.parseProfile({ profileText });
       setParsedProfile(parsed.data);
 
+      setNotice("Live sprint running: discovering public people with Exa...");
       const discovered = await api.discoverTargets({ target, parsedProfile: parsed.data });
       setPeople(discovered.data.results);
 
+      if (!discovered.data.results.length) {
+        setPaths([]);
+        setDraft(null);
+        setSelectedPathId(null);
+        setNotice("Live discovery completed, but no public people were found for that target.");
+        return;
+      }
+
+      setNotice("Live sprint running: ranking trust paths with OpenAI...");
       const ranked = await api.rankTrustPaths({
         target,
         parsedProfile: parsed.data,
@@ -425,6 +453,7 @@ export default function App() {
       setSelectedPathId(bestPath?.id ?? null);
 
       if (bestPath) {
+        setNotice("Live sprint running: drafting contextual outreach...");
         const drafted = await api.draftOutreach({
           target,
           parsedProfile: parsed.data,
@@ -435,20 +464,11 @@ export default function App() {
       }
 
       setNotice("Sprint complete. Review the best path, copy the draft, then track the outcome.");
+    } catch (error) {
+      setNotice(`Live sprint failed: ${errorMessage(error)}`);
     } finally {
       setLoading("idle");
     }
-  }
-
-  function loadDemo() {
-    setProfileText(seedDemo.profileText);
-    setTarget(seedDemo.target);
-    setParsedProfile(seedDemo.parsedProfile);
-    setPeople(seedDemo.discoveredPeople);
-    setPaths(seedDemo.rankedPaths);
-    setSelectedPathId(seedDemo.rankedPaths[0]?.id ?? null);
-    setDraft(seedDemo.outreachDraft);
-    setNotice("Demo reset.");
   }
 
   function selectPerson(personName: string) {
@@ -483,21 +503,17 @@ export default function App() {
             aria-label="Target role, company, person, or opportunity"
             value={target}
             onChange={(event) => setTarget(event.target.value)}
-            placeholder="AI platform role at a climate tech startup"
+            placeholder="Paste a real target role, company, person, or opportunity"
           />
-          <button disabled={loading === "discover" || !target.trim()} onClick={() => discoverTargets()} type="button">
+          <button disabled={loading === "discover" || !target.trim() || !parsedProfile} onClick={() => discoverTargets()} type="button">
             {loading === "discover" ? <Loader2 className="spin" size={16} /> : <ArrowRight size={16} />}
             Discover
           </button>
         </div>
 
         <div className="command-actions">
-          <span className="mode-dot">Demo mode</span>
-          <button className="quiet-action" onClick={loadDemo} type="button">
-            <Sparkles size={15} />
-            Reset
-          </button>
-          <button className="run-action" disabled={isBusy || !target.trim()} onClick={runSprint} type="button">
+          <span className="mode-dot">Live mode</span>
+          <button className="run-action" disabled={isBusy || !target.trim() || !profileText.trim()} onClick={runSprint} type="button">
             {loading === "sprint" ? <Loader2 className="spin" size={16} /> : <Radar size={16} />}
             Run sprint
           </button>

@@ -28,10 +28,4 @@ OPENAI_API_KEY=
 EXA_API_KEY=
 ```
 
-Optional for deterministic demo rehearsal:
-
-```bash
-FORCE_DEMO_MODE=true
-```
-
-The app still works without API keys through seed fallback data.
+The app runs live only. If either API key is missing or an API call fails, the UI shows an explicit error instead of substituting sample records.

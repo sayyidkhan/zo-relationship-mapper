@@ -7,8 +7,7 @@ import type {
   ParsedProfile,
   ParseProfileRequest,
   RankTrustPathsRequest,
-  RankTrustPathsResponse,
-  SeedDemo
+  RankTrustPathsResponse
 } from "../types/api";
 
 const API_BASE_URL = import.meta.env.VITE_API_BASE_URL || "http://localhost:8890";
@@ -23,7 +22,14 @@ async function request<T>(path: string, init?: RequestInit): Promise<ApiEnvelope
   });
 
   if (!response.ok) {
-    const message = await response.text();
+    const text = await response.text();
+    let message = text;
+    try {
+      const parsed = JSON.parse(text) as { error?: string };
+      message = parsed.error || text;
+    } catch {
+      message = text;
+    }
     throw new Error(message || `Request failed: ${response.status}`);
   }
 
@@ -31,7 +37,6 @@ async function request<T>(path: string, init?: RequestInit): Promise<ApiEnvelope
 }
 
 export const api = {
-  getSeed: () => request<SeedDemo>("/api/demo/seed"),
   parseProfile: (body: ParseProfileRequest) =>
     request<ParsedProfile>("/api/profile/parse", {
       method: "POST",
