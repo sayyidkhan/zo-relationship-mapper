@@ -100,7 +100,19 @@ function normalizeContactType(value: unknown, title = ""): ContactType {
 }
 
 function normalizeUrl(url: string) {
-  return url.trim().replace(/[?#].*$/, "");
+  const parsed = httpUrl(url);
+  return parsed ? parsed.replace(/[?#].*$/, "") : "";
+}
+
+function httpUrl(value: unknown) {
+  if (typeof value !== "string") return undefined;
+  try {
+    const parsed = new URL(value.trim());
+    if (parsed.protocol !== "http:" && parsed.protocol !== "https:") return undefined;
+    return parsed.toString();
+  } catch {
+    return undefined;
+  }
 }
 
 function isLinkedInProfileUrl(url: string) {
@@ -201,6 +213,13 @@ async function normalizeExaJobs(
     url: result.url || "",
     snippet: (result.snippet || result.text || "").replace(/\s+/g, " ").trim().slice(0, 900)
   }));
+  const rawByIndex = new Map<number, (typeof raw)[number]>();
+  const rawByUrl = new Map<string, (typeof raw)[number]>();
+  for (const result of raw) {
+    rawByIndex.set(result.index, result);
+    const normalizedUrl = normalizeUrl(result.url);
+    if (normalizedUrl) rawByUrl.set(normalizedUrl, result);
+  }
 
   const normalized = await askJson<DiscoverJobsResponse>(
     [
@@ -209,7 +228,8 @@ async function normalizeExaJobs(
       "Keep only results that look like real job, role, fellowship, contract, startup, or talent opportunity pages.",
       "Rank jobs from best to worst fit for the parsed profile.",
       "Return only valid JSON: {\"jobs\":[...]}.",
-      "Each job must have id, title, company, location, url, source, snippet, fitScore, seniority, whyThisJob, matchSignals, concerns.",
+      "Each job must have id, sourceIndex, title, company, location, url, source, snippet, fitScore, seniority, whyThisJob, matchSignals, concerns.",
+      "sourceIndex must be the rawResults index for the exact source result. url must be copied exactly from rawResults[sourceIndex]. Do not synthesize job URLs.",
       "source must be \"exa\". fitScore must be 0-100. matchSignals and concerns must be short strings grounded in the provided result/profile."
     ].join(" "),
     JSON.stringify({ searchFocus, parsedProfile, rawResults: raw }, null, 2),
@@ -218,21 +238,30 @@ async function normalizeExaJobs(
 
   return {
     jobs: normalized.jobs
-      .filter((job) => job.title && job.url)
-      .map((job, index) => ({
-        id: job.id || stableId(job.url || `${job.company}-${job.title}-${index}`),
-        title: job.title,
-        company: job.company || "Unknown organization",
-        location: job.location || "Location not returned",
-        url: job.url,
-        source: "exa" as const,
-        snippet: job.snippet || "Public job result returned by Exa.",
-        fitScore: clampScore(job.fitScore),
-        seniority: job.seniority || "Seniority not returned",
-        whyThisJob: job.whyThisJob || "Relevant to the parsed profile based on public job data.",
-        matchSignals: asStringArray(job.matchSignals, ["public job match"]).slice(0, 5),
-        concerns: asStringArray(job.concerns, ["Validate the role details on the source page."]).slice(0, 4)
-      }))
+      .map<JobOpportunity | null>((job, index) => {
+        const sourceIndex = Number((job as JobOpportunity & { sourceIndex?: unknown; rawIndex?: unknown }).sourceIndex ?? undefined);
+        const sourceByIndex = Number.isInteger(sourceIndex) ? rawByIndex.get(sourceIndex) : undefined;
+        const sourceByUrl = rawByUrl.get(normalizeUrl(job.url));
+        const source = sourceByIndex || sourceByUrl || raw[index];
+        const sourceUrl = httpUrl(source?.url);
+        if (!job.title || !sourceUrl) return null;
+
+        return {
+          id: job.id || stableId(sourceUrl || `${job.company}-${job.title}-${index}`),
+          title: job.title,
+          company: job.company || "Unknown organization",
+          location: job.location || "Location not returned",
+          url: sourceUrl,
+          source: "exa" as const,
+          snippet: job.snippet || source?.snippet || "Public job result returned by Exa.",
+          fitScore: clampScore(job.fitScore),
+          seniority: job.seniority || "Seniority not returned",
+          whyThisJob: job.whyThisJob || "Relevant to the parsed profile based on public job data.",
+          matchSignals: asStringArray(job.matchSignals, ["public job match"]).slice(0, 5),
+          concerns: asStringArray(job.concerns, ["Validate the role details on the source page."]).slice(0, 4)
+        };
+      })
+      .filter((job): job is JobOpportunity => job !== null)
       .sort((a, b) => b.fitScore - a.fitScore)
   };
 }
@@ -249,13 +278,12 @@ async function normalizeExaPeople(
     publicEmail: extractPublicEmail(`${result.title || ""} ${result.snippet || ""} ${result.text || ""}`),
     snippet: (result.snippet || result.text || "").replace(/\s+/g, " ").trim().slice(0, 900)
   }));
-  const observedEmails = new Set<string>();
-  const observedEmailsByUrl = new Map<string, string>();
+  const rawByIndex = new Map<number, (typeof raw)[number]>();
+  const rawByUrl = new Map<string, (typeof raw)[number]>();
   for (const result of raw) {
-    if (result.publicEmail) {
-      observedEmails.add(result.publicEmail);
-      observedEmailsByUrl.set(normalizeUrl(result.url), result.publicEmail);
-    }
+    rawByIndex.set(result.index, result);
+    const normalizedUrl = normalizeUrl(result.url);
+    if (normalizedUrl) rawByUrl.set(normalizedUrl, result);
   }
 
   const normalized = await askJson<DiscoverPeopleResponse>(
@@ -266,7 +294,8 @@ async function normalizeExaPeople(
       "Prefer hiring managers, team leads, directors, heads, founders, senior ICs who can mentor, and employees doing similar work.",
       "If a result is not clearly a person but still useful, keep it only if it is directly relevant and make the name the public page title.",
       "Return only valid JSON: {\"results\":[...]}.",
-      "Each result must have id, name, title, company, url, profileUrl, linkedinUrl, publicEmail, contactMethods, source, contactType, snippet, signals, whyTalk.",
+      "Each result must have id, sourceIndex, name, title, company, url, profileUrl, linkedinUrl, publicEmail, contactMethods, source, contactType, snippet, signals, whyTalk.",
+      "sourceIndex must be the rawResults index for the exact public source result. url/profileUrl/linkedinUrl may only be copied from rawResults[sourceIndex]. Do not synthesize LinkedIn or profile URLs.",
       "source must be \"exa\". contactType must be one of hiring_manager, mentor, colleague.",
       "publicEmail must be null/omitted unless the raw Exa result explicitly includes that email. Do not infer or guess email formats.",
       "signals and whyTalk must be grounded in the public result and selected job."
@@ -277,24 +306,30 @@ async function normalizeExaPeople(
 
   return {
     results: normalized.results
-      .filter((person) => person.name && person.url)
-      .map((person, index) => {
-        const profileUrl = person.profileUrl || person.url;
-        const normalizedUrl = normalizeUrl(profileUrl);
-        const linkedinUrl = person.linkedinUrl || (isLinkedInProfileUrl(profileUrl) ? profileUrl : undefined);
-        const requestedEmail = person.publicEmail && observedEmails.has(person.publicEmail) ? person.publicEmail : undefined;
-        const publicEmail = requestedEmail || observedEmailsByUrl.get(normalizedUrl);
+      .map<DiscoveredPerson | null>((person, index) => {
+        const sourceIndex = Number((person as DiscoveredPerson & { sourceIndex?: unknown; rawIndex?: unknown }).sourceIndex ?? undefined);
+        const sourceByIndex = Number.isInteger(sourceIndex) ? rawByIndex.get(sourceIndex) : undefined;
+        const sourceByUrl =
+          rawByUrl.get(normalizeUrl(person.url)) ||
+          rawByUrl.get(normalizeUrl(person.profileUrl)) ||
+          rawByUrl.get(normalizeUrl(person.linkedinUrl || ""));
+        const source = sourceByIndex || sourceByUrl || raw[index];
+        const profileUrl = httpUrl(source?.url);
+        if (!person.name || !profileUrl) return null;
+
+        const linkedinUrl = isLinkedInProfileUrl(profileUrl) ? profileUrl : undefined;
+        const publicEmail = source?.publicEmail;
         const contactMethods: ContactMethod[] = [
           linkedinUrl ? "linkedin" : "profile",
           ...(publicEmail ? (["email"] as ContactMethod[]) : [])
         ];
 
         return {
-          id: person.id || stableId(person.url || `${person.name}-${index}`),
+          id: person.id || stableId(profileUrl || `${person.name}-${index}`),
           name: person.name,
           title: person.title || "Public result related to the selected job",
           company: person.company || selectedJob.company,
-          url: person.url,
+          url: profileUrl,
           profileUrl,
           linkedinUrl,
           publicEmail,
@@ -306,6 +341,7 @@ async function normalizeExaPeople(
           whyTalk: person.whyTalk || "Public profile appears relevant to the selected job or company."
         };
       })
+      .filter((person): person is DiscoveredPerson => person !== null)
   };
 }
 

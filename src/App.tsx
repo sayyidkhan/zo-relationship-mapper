@@ -84,6 +84,46 @@ function errorMessage(error: unknown) {
   return error instanceof Error ? error.message : "Something went wrong.";
 }
 
+function safeExternalUrl(value?: string) {
+  if (!value) return "";
+  try {
+    const url = new URL(value);
+    if (url.protocol !== "http:" && url.protocol !== "https:") return "";
+    return url.toString();
+  } catch {
+    return "";
+  }
+}
+
+async function copyTextToClipboard(text: string) {
+  try {
+    const textarea = document.createElement("textarea");
+    textarea.value = text;
+    textarea.setAttribute("readonly", "true");
+    textarea.style.position = "fixed";
+    textarea.style.top = "0";
+    textarea.style.left = "0";
+    textarea.style.width = "1px";
+    textarea.style.height = "1px";
+    textarea.style.opacity = "0";
+    textarea.style.pointerEvents = "none";
+    document.body.appendChild(textarea);
+    textarea.focus({ preventScroll: true });
+    textarea.select();
+    textarea.setSelectionRange(0, text.length);
+    const copied = document.execCommand("copy");
+    textarea.remove();
+    if (!copied) throw new Error("Legacy clipboard copy was blocked.");
+    return;
+  } catch (legacyError) {
+    try {
+      await navigator.clipboard.writeText(text);
+    } catch {
+      throw legacyError instanceof Error ? legacyError : new Error("Clipboard copy was blocked.");
+    }
+  }
+}
+
 function ProgressRail({ activeStep }: { activeStep: number }) {
   const steps = [
     { icon: FileText, label: "Profile" },
@@ -315,38 +355,48 @@ function OpportunityDrawer({
                   </div>
                   <div className="contact-list">
                     {group.people.length ? (
-                      group.people.map((person) => (
-                        <article
-                          className={`person-card ${selectedPath?.personName === person.name ? "selected" : ""}`}
-                          key={person.id}
-                        >
-                          <button className="person-main" onClick={() => onSelectPerson(person.name)} type="button">
-                            <span className="identity">
-                              <strong>{person.name}</strong>
-                              <small>{person.title}</small>
-                            </span>
-                            <span className="signals">{person.whyTalk || shortList(person.signals, 2)}</span>
-                          </button>
-                          <div className="contact-actions">
-                            <a href={person.linkedinUrl || person.profileUrl} rel="noreferrer" target="_blank">
-                              <ExternalLink size={13} />
-                              {person.linkedinUrl ? "LinkedIn" : "Profile"}
-                            </a>
-                            {person.publicEmail ? (
-                              <a href={`mailto:${person.publicEmail}`}>
-                                <ExternalLink size={13} />
-                                Email
-                              </a>
-                            ) : (
-                              <span>No public email</span>
-                            )}
-                            <button onClick={() => onCopyProfile(person)} type="button">
-                              <Clipboard size={13} />
-                              Copy URL
+                      group.people.map((person) => {
+                        const linkedInUrl = safeExternalUrl(person.linkedinUrl);
+                        const profileUrl = safeExternalUrl(person.profileUrl) || safeExternalUrl(person.url);
+                        const contactUrl = linkedInUrl || profileUrl;
+
+                        return (
+                          <article
+                            className={`person-card ${selectedPath?.personName === person.name ? "selected" : ""}`}
+                            key={person.id}
+                          >
+                            <button className="person-main" onClick={() => onSelectPerson(person.name)} type="button">
+                              <span className="identity">
+                                <strong>{person.name}</strong>
+                                <small>{person.title}</small>
+                              </span>
+                              <span className="signals">{person.whyTalk || shortList(person.signals, 2)}</span>
                             </button>
-                          </div>
-                        </article>
-                      ))
+                            <div className="contact-actions">
+                              {contactUrl ? (
+                                <a href={contactUrl} rel="noreferrer" target="_blank">
+                                  <ExternalLink size={13} />
+                                  {linkedInUrl ? "LinkedIn" : "Profile"}
+                                </a>
+                              ) : (
+                                <span>No public URL</span>
+                              )}
+                              {person.publicEmail ? (
+                                <a href={`mailto:${person.publicEmail}`}>
+                                  <ExternalLink size={13} />
+                                  Email
+                                </a>
+                              ) : (
+                                <span>No public email</span>
+                              )}
+                              <button disabled={!contactUrl} onClick={() => onCopyProfile(person)} type="button">
+                                <Clipboard size={13} />
+                                Copy URL
+                              </button>
+                            </div>
+                          </article>
+                        );
+                      })
                     ) : (
                       <div className="contact-empty">No public match returned.</div>
                     )}
@@ -788,13 +838,26 @@ export default function App() {
 
   async function copyDraft() {
     if (!draft) return;
-    await navigator.clipboard.writeText(`${draft.subject}\n\n${draft.message}\n\nFollow-up: ${draft.followUp}`);
-    setNotice("Draft copied.");
+    try {
+      await copyTextToClipboard(`${draft.subject}\n\n${draft.message}\n\nFollow-up: ${draft.followUp}`);
+      setNotice("Draft copied.");
+    } catch (error) {
+      setNotice(`Copy failed: ${errorMessage(error)}`);
+    }
   }
 
   async function copyProfile(person: DiscoveredPerson) {
-    await navigator.clipboard.writeText(person.linkedinUrl || person.profileUrl);
-    setNotice(`${person.name}'s profile URL copied.`);
+    const contactUrl = safeExternalUrl(person.linkedinUrl) || safeExternalUrl(person.profileUrl) || safeExternalUrl(person.url);
+    if (!contactUrl) {
+      setNotice(`No working public URL was returned for ${person.name}.`);
+      return;
+    }
+    try {
+      await copyTextToClipboard(contactUrl);
+      setNotice(`${person.name}'s profile URL copied.`);
+    } catch {
+      setNotice(`Clipboard blocked. Public URL: ${contactUrl}`);
+    }
   }
 
   function changeDraftChannel(channel: OutreachChannel) {
