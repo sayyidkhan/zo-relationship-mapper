@@ -6,6 +6,16 @@ Zo Relationship Mapper is a live career opportunity and relationship-mapping too
 
 The app intentionally does not fall back to seed/demo data. If OpenAI or Exa is unavailable, the UI shows an explicit error so the operator knows the result is not real.
 
+## Hackathon Submission Links
+
+| Field | Link |
+| --- | --- |
+| Code repository | https://github.com/sayyidkhan/zo-relationship-mapper |
+| Live website | https://zo-relationship-mapper-sayyidkhan.zocomputer.io |
+| Demo video | https://youtu.be/Qaa5arkLI6g |
+| Pitch deck | https://docs.google.com/presentation/d/1HGynjgllHhS4Ka5_ZNsVEv4eWn-HLSHd/edit?usp=sharing&ouid=102958531012433256044&rtpof=true&sd=true |
+| Instagram post | https://www.instagram.com/p/DaFSqK7k2ce/?img_index=1 |
+
 ## Product Idea
 
 Cold applications are low-leverage. Most strong opportunities are unlocked through context, timing, and people. This project turns a resume/profile into a practical job-path sprint:
