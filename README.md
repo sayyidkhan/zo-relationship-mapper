@@ -35,6 +35,12 @@ For Zo Computer Hosting, use this service command from the project directory:
 bash scripts/zo-deploy.sh
 ```
 
+For a terminal-based sync deploy on Zo Computer, run:
+
+```bash
+PORT=8000 bash scripts/zo-restart.sh
+```
+
 To sync and rebuild without starting the server:
 
 ```bash
