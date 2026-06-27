@@ -274,12 +274,21 @@ https://zo-relationship-mapper-sayyidkhan.zocomputer.io
 Zo Computer project directory:
 
 ```text
-/home/workspace/hackathon/suphackathon2026
+/home/workspace/hackathon/suphackathon2026/zo-relationship-mapper
+```
+
+Recommended Zo workspace layout:
+
+```text
+/home/workspace/hackathon/suphackathon2026/
+|-- zo-relationship-mapper/
+`-- zo-expert/
 ```
 
 Zo Hosting service command:
 
 ```bash
+cd /home/workspace/hackathon/suphackathon2026/zo-relationship-mapper
 PORT=8000 bash scripts/zo-deploy.sh
 ```
 
@@ -297,7 +306,7 @@ The deploy script:
 For a streamlined terminal deploy on Zo Computer:
 
 ```bash
-cd /home/workspace/hackathon/suphackathon2026
+cd /home/workspace/hackathon/suphackathon2026/zo-relationship-mapper
 PORT=8000 bash scripts/zo-restart.sh
 ```
 
@@ -342,7 +351,7 @@ If the health check shows `openaiConfigured: false` or `exaConfigured: false`, a
 Start or restart the app from the Zo terminal:
 
 ```bash
-cd /home/workspace/hackathon/suphackathon2026
+cd /home/workspace/hackathon/suphackathon2026/zo-relationship-mapper
 PORT=8000 bash scripts/zo-restart.sh
 ```
 
