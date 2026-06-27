@@ -2,22 +2,29 @@ import cors from "cors";
 import dotenv from "dotenv";
 import express from "express";
 import OpenAI from "openai";
+import path from "node:path";
 import type {
   ApiEnvelope,
-  DiscoverTargetsResponse,
+  ContactType,
+  DiscoverJobsResponse,
+  DiscoverPeopleResponse,
   DiscoveredPerson,
   DraftOutreachRequest,
+  JobOpportunity,
   OutreachDraft,
   ParsedProfile,
   RankTrustPathsResponse
 } from "../src/types/api";
 
+type ExaResult = { title?: string; url?: string; text?: string; snippet?: string };
+
 dotenv.config();
 
 const app = express();
-const port = Number(process.env.API_PORT || 8890);
+const port = Number(process.env.PORT || process.env.API_PORT || 8890);
 const openai = process.env.OPENAI_API_KEY ? new OpenAI({ apiKey: process.env.OPENAI_API_KEY }) : null;
 const openaiModel = process.env.OPENAI_MODEL || "gpt-4o-mini";
+const distPath = path.resolve(process.cwd(), "dist");
 
 app.use(cors());
 app.use(express.json({ limit: "2mb" }));
@@ -56,6 +63,38 @@ function stableId(value: string): string {
     .slice(0, 64);
 }
 
+function clampScore(value: unknown) {
+  const score = Number(value);
+  if (!Number.isFinite(score)) return 50;
+  return Math.max(0, Math.min(100, Math.round(score)));
+}
+
+function asStringArray(value: unknown, defaultItems: string[] = []) {
+  if (Array.isArray(value)) {
+    return value.map((item) => String(item).trim()).filter(Boolean);
+  }
+  if (typeof value === "string" && value.trim()) {
+    return [value.trim()];
+  }
+  return defaultItems;
+}
+
+function normalizeContactType(value: unknown, title = ""): ContactType {
+  const text = `${String(value ?? "")} ${title}`.toLowerCase();
+  if (text.includes("mentor") || text.includes("advisor")) return "mentor";
+  if (
+    text.includes("manager") ||
+    text.includes("director") ||
+    text.includes("head") ||
+    text.includes("lead") ||
+    text.includes("founder") ||
+    text.includes("cto")
+  ) {
+    return "hiring_manager";
+  }
+  return "colleague";
+}
+
 function extractJson(text: string): unknown {
   try {
     return JSON.parse(text);
@@ -86,34 +125,45 @@ async function askJson<T>(system: string, user: string, timeout = 30_000): Promi
   return extractJson(content) as T;
 }
 
-function normalizeExaResult(
-  result: { title?: string; url?: string; text?: string; snippet?: string },
-  index: number,
-  target: string
-): DiscoveredPerson {
-  const title = result.title?.replace(/\s+\|\s+LinkedIn.*$/i, "").trim() || `Public profile ${index + 1}`;
-  const parts = title.split(/\s[-|–]\s/).map((part) => part.trim()).filter(Boolean);
-  const name = parts[0] || title;
-  const role = parts[1] || "Public profile related to target";
-  const snippet = (result.snippet || result.text || "Public result related to the target.").replace(/\s+/g, " ").trim();
+async function searchExa(query: string, numResults: number, includeDomains: string[]) {
+  const exaKey = requireExaKey();
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), 25_000);
 
-  return {
-    id: stableId(result.url || `${title}-${index}`),
-    name,
-    title: role,
-    company: target,
-    url: result.url || "#",
-    source: "exa",
-    snippet: snippet.slice(0, 320),
-    signals: ["public result", "target relevance", "Exa discovery"]
-  };
+  try {
+    const exaResponse = await fetch("https://api.exa.ai/search", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "x-api-key": exaKey
+      },
+      signal: controller.signal,
+      body: JSON.stringify({
+        query,
+        type: "auto",
+        numResults,
+        includeDomains,
+        contents: { text: true }
+      })
+    });
+
+    if (!exaResponse.ok) {
+      const body = await exaResponse.text();
+      throw new Error(`Exa search failed with ${exaResponse.status}: ${body.slice(0, 240)}`);
+    }
+
+    const payload = (await exaResponse.json()) as { results?: ExaResult[] };
+    return payload.results ?? [];
+  } finally {
+    clearTimeout(timeout);
+  }
 }
 
-async function normalizeExaPeople(
-  target: string,
+async function normalizeExaJobs(
+  searchFocus: string,
   parsedProfile: ParsedProfile,
-  rawResults: Array<{ title?: string; url?: string; text?: string; snippet?: string }>
-): Promise<DiscoverTargetsResponse> {
+  rawResults: ExaResult[]
+): Promise<DiscoverJobsResponse> {
   const raw = rawResults.slice(0, 10).map((result, index) => ({
     index,
     title: result.title || "",
@@ -121,17 +171,66 @@ async function normalizeExaPeople(
     snippet: (result.snippet || result.text || "").replace(/\s+/g, " ").trim().slice(0, 900)
   }));
 
-  const normalized = await askJson<DiscoverTargetsResponse>(
+  const normalized = await askJson<DiscoverJobsResponse>(
     [
-      "You convert real Exa public search results into clean people/company discovery rows for a trust-path mapper.",
+      "You convert real Exa public search results into ranked job opportunities for a career opportunity mapper.",
+      "Use only the provided Exa result titles, URLs, and snippets plus the parsed profile. Do not invent companies, job titles, salaries, requirements, or availability.",
+      "Keep only results that look like real job, role, fellowship, contract, startup, or talent opportunity pages.",
+      "Rank jobs from best to worst fit for the parsed profile.",
+      "Return only valid JSON: {\"jobs\":[...]}.",
+      "Each job must have id, title, company, location, url, source, snippet, fitScore, seniority, whyThisJob, matchSignals, concerns.",
+      "source must be \"exa\". fitScore must be 0-100. matchSignals and concerns must be short strings grounded in the provided result/profile."
+    ].join(" "),
+    JSON.stringify({ searchFocus, parsedProfile, rawResults: raw }, null, 2),
+    35_000
+  );
+
+  return {
+    jobs: normalized.jobs
+      .filter((job) => job.title && job.url)
+      .map((job, index) => ({
+        id: job.id || stableId(job.url || `${job.company}-${job.title}-${index}`),
+        title: job.title,
+        company: job.company || "Unknown organization",
+        location: job.location || "Location not returned",
+        url: job.url,
+        source: "exa" as const,
+        snippet: job.snippet || "Public job result returned by Exa.",
+        fitScore: clampScore(job.fitScore),
+        seniority: job.seniority || "Seniority not returned",
+        whyThisJob: job.whyThisJob || "Relevant to the parsed profile based on public job data.",
+        matchSignals: asStringArray(job.matchSignals, ["public job match"]).slice(0, 5),
+        concerns: asStringArray(job.concerns, ["Validate the role details on the source page."]).slice(0, 4)
+      }))
+      .sort((a, b) => b.fitScore - a.fitScore)
+  };
+}
+
+async function normalizeExaPeople(
+  selectedJob: JobOpportunity,
+  parsedProfile: ParsedProfile,
+  rawResults: ExaResult[]
+): Promise<DiscoverPeopleResponse> {
+  const raw = rawResults.slice(0, 10).map((result, index) => ({
+    index,
+    title: result.title || "",
+    url: result.url || "",
+    snippet: (result.snippet || result.text || "").replace(/\s+/g, " ").trim().slice(0, 900)
+  }));
+
+  const normalized = await askJson<DiscoverPeopleResponse>(
+    [
+      "You convert real Exa public search results into people to talk to for a selected job opportunity.",
       "Use only the provided Exa result titles, URLs, and snippets. Do not invent employers, titles, or relationships.",
-      "Prefer individual people, hiring managers, founders, recruiters, engineering/product leaders, or community operators.",
+      "Return only three contact categories: hiring managers, mentors, and colleagues currently or previously close to the selected company or role.",
+      "Prefer hiring managers, team leads, directors, heads, founders, senior ICs who can mentor, and employees doing similar work.",
       "If a result is not clearly a person but still useful, keep it only if it is directly relevant and make the name the public page title.",
       "Return only valid JSON: {\"results\":[...]}.",
-      "Each result must have id, name, title, company, url, source, snippet, signals.",
-      "source must be \"exa\". signals must be short strings grounded in the public result."
+      "Each result must have id, name, title, company, url, source, contactType, snippet, signals, whyTalk.",
+      "source must be \"exa\". contactType must be one of hiring_manager, mentor, colleague.",
+      "signals and whyTalk must be grounded in the public result and selected job."
     ].join(" "),
-    JSON.stringify({ target, parsedProfile, rawResults: raw }, null, 2),
+    JSON.stringify({ selectedJob, parsedProfile, rawResults: raw }, null, 2),
     25_000
   );
 
@@ -141,12 +240,14 @@ async function normalizeExaPeople(
       .map((person, index) => ({
         id: person.id || stableId(person.url || `${person.name}-${index}`),
         name: person.name,
-        title: person.title || "Public result related to target",
-        company: person.company || "Unknown organization",
+        title: person.title || "Public result related to the selected job",
+        company: person.company || selectedJob.company,
         url: person.url,
-        source: "exa",
-        snippet: person.snippet || "Public result related to the target.",
-        signals: person.signals?.length ? person.signals.slice(0, 5) : ["public result", "target relevance"]
+        source: "exa" as const,
+        contactType: normalizeContactType(person.contactType, `${person.title} ${person.snippet}`),
+        snippet: person.snippet || "Public result related to the selected job.",
+        signals: asStringArray(person.signals, ["public result", "job relevance"]).slice(0, 5),
+        whyTalk: person.whyTalk || "Public profile appears relevant to the selected job or company."
       }))
   };
 }
@@ -184,85 +285,106 @@ app.post("/api/profile/parse", async (request, response) => {
   }
 });
 
-app.post("/api/targets/discover", async (request, response) => {
-  const target = String(request.body?.target ?? "").trim();
+app.post("/api/jobs/discover", async (request, response) => {
+  const searchFocus = String(request.body?.searchFocus ?? "").trim();
   const parsedProfile = request.body?.parsedProfile as ParsedProfile | undefined;
 
-  if (!target) {
-    fail(response, 400, "Enter a real target role, company, person, or opportunity before discovery.");
-    return;
-  }
   if (!parsedProfile) {
-    fail(response, 400, "Parse a real profile before running discovery.");
+    fail(response, 400, "Parse a real profile before discovering jobs.");
     return;
   }
 
   const endpointTimeout = setTimeout(() => {
     if (!response.headersSent) {
-      fail(response, 504, "Live discovery timed out while calling Exa/OpenAI. Try a narrower target.");
+      fail(response, 504, "Live job discovery timed out while calling Exa/OpenAI. Try a narrower job search focus.");
     }
-  }, 55_000);
+  }, 70_000);
 
   try {
-    const exaKey = requireExaKey();
-    const controller = new AbortController();
-    const timeout = setTimeout(() => controller.abort(), 20_000);
     const query = [
-      "site:linkedin.com/in",
-      target,
-      "hiring manager recruiter founder engineering product AI climate sustainability Singapore",
-      parsedProfile.domains?.slice(0, 4).join(" "),
-      parsedProfile.skills?.slice(0, 5).join(" ")
+      searchFocus || "Singapore remote",
+      "job opening hiring careers role apply",
+      asStringArray(parsedProfile.roles).slice(0, 4).join(" "),
+      asStringArray(parsedProfile.domains).slice(0, 4).join(" "),
+      asStringArray(parsedProfile.skills).slice(0, 7).join(" ")
     ]
       .filter(Boolean)
       .join(" ");
 
-    const exaResponse = await fetch("https://api.exa.ai/search", {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        "x-api-key": exaKey
-      },
-      signal: controller.signal,
-      body: JSON.stringify({
-        query,
-        type: "auto",
-        numResults: 8,
-        includeDomains: ["linkedin.com", "wellfound.com", "crunchbase.com"],
-        contents: { text: true }
-      })
-    });
-    clearTimeout(timeout);
+    const rawResults = await searchExa(query, 12, [
+      "linkedin.com",
+      "greenhouse.io",
+      "lever.co",
+      "wellfound.com",
+      "workable.com",
+      "mycareersfuture.gov.sg",
+      "ashbyhq.com",
+      "workdayjobs.com",
+      "smartrecruiters.com"
+    ]);
 
-    if (!exaResponse.ok) {
-      const body = await exaResponse.text();
-      throw new Error(`Exa search failed with ${exaResponse.status}: ${body.slice(0, 240)}`);
-    }
-
-    const payload = (await exaResponse.json()) as {
-      results?: Array<{ title?: string; url?: string; text?: string; snippet?: string }>;
-    };
-
-    const rawResults = payload.results ?? [];
     if (!rawResults.length) {
       if (!response.headersSent) {
-        response.json(envelope<DiscoverTargetsResponse>({ results: [] }, "Exa returned no public results."));
+        response.json(envelope<DiscoverJobsResponse>({ jobs: [] }, "Exa returned no public job results."));
       }
       return;
     }
 
-    try {
-      const normalized = await normalizeExaPeople(target, parsedProfile, rawResults);
-      if (!response.headersSent) response.json(envelope(normalized));
-    } catch {
-      const results = rawResults.map((result, index) => normalizeExaResult(result, index, target));
-      if (!response.headersSent) {
-        response.json(envelope<DiscoverTargetsResponse>({ results }, "Used raw Exa result normalization."));
-      }
-    }
+    const normalized = await normalizeExaJobs(searchFocus, parsedProfile, rawResults);
+    if (!response.headersSent) response.json(envelope(normalized));
   } catch (error) {
     if (!response.headersSent) {
-      fail(response, 502, error instanceof Error ? error.message : "Exa discovery failed.");
+      fail(response, 502, error instanceof Error ? error.message : "Live job discovery failed.");
+    }
+  } finally {
+    clearTimeout(endpointTimeout);
+  }
+});
+
+app.post("/api/people/discover", async (request, response) => {
+  const selectedJob = request.body?.selectedJob as JobOpportunity | undefined;
+  const parsedProfile = request.body?.parsedProfile as ParsedProfile | undefined;
+
+  if (!selectedJob) {
+    fail(response, 400, "Select a real job before discovering people to talk to.");
+    return;
+  }
+  if (!parsedProfile) {
+    fail(response, 400, "Parse a real profile before discovering people.");
+    return;
+  }
+
+  const endpointTimeout = setTimeout(() => {
+    if (!response.headersSent) {
+      fail(response, 504, "Live people discovery timed out while calling Exa/OpenAI. Try a narrower job.");
+    }
+  }, 60_000);
+
+  try {
+    const query = [
+      "site:linkedin.com/in",
+      selectedJob.company,
+      selectedJob.title,
+      "hiring manager engineering manager product manager team lead director founder mentor staff engineer senior engineer colleague",
+      asStringArray(parsedProfile.domains).slice(0, 4).join(" "),
+      asStringArray(parsedProfile.skills).slice(0, 6).join(" ")
+    ]
+      .filter(Boolean)
+      .join(" ");
+
+    const rawResults = await searchExa(query, 10, ["linkedin.com", "wellfound.com", "crunchbase.com"]);
+    if (!rawResults.length) {
+      if (!response.headersSent) {
+        response.json(envelope<DiscoverPeopleResponse>({ results: [] }, "Exa returned no public people results."));
+      }
+      return;
+    }
+
+    const normalized = await normalizeExaPeople(selectedJob, parsedProfile, rawResults);
+    if (!response.headersSent) response.json(envelope(normalized));
+  } catch (error) {
+    if (!response.headersSent) {
+      fail(response, 502, error instanceof Error ? error.message : "Live people discovery failed.");
     }
   } finally {
     clearTimeout(endpointTimeout);
@@ -270,24 +392,25 @@ app.post("/api/targets/discover", async (request, response) => {
 });
 
 app.post("/api/trust-paths/rank", async (request, response) => {
-  const target = String(request.body?.target ?? "").trim();
+  const selectedJob = request.body?.selectedJob as JobOpportunity | undefined;
   const parsedProfile = request.body?.parsedProfile as ParsedProfile | undefined;
   const discoveredPeople = (request.body?.discoveredPeople ?? []) as DiscoveredPerson[];
 
-  if (!target || !parsedProfile || !discoveredPeople.length) {
-    fail(response, 400, "Target, parsed profile, and real discovered people are required before ranking.");
+  if (!selectedJob || !parsedProfile || !discoveredPeople.length) {
+    fail(response, 400, "Selected job, parsed profile, and real discovered people are required before ranking.");
     return;
   }
 
   try {
     const ranked = await askJson<RankTrustPathsResponse>(
       [
-        "You rank real opportunity trust paths using only the provided profile and discovered public people.",
+        "You rank real opportunity trust paths for a selected job using only the provided profile, selected job, and discovered public people.",
         "Return only valid JSON with a paths array.",
         "Each path needs: id, personName, role, company, score 0-100, confidence high/medium/low, trustReason, suggestedAsk, risks array, sourceUrl.",
+        "Prioritize people who are likely to help the candidate understand the role, hiring context, team, or company.",
         "Do not invent a direct relationship. If public data is weak, lower confidence and explain the risk."
       ].join(" "),
-      JSON.stringify({ target, parsedProfile, discoveredPeople }, null, 2),
+      JSON.stringify({ selectedJob, parsedProfile, discoveredPeople }, null, 2),
       35_000
     );
     response.json(envelope(ranked));
@@ -298,17 +421,17 @@ app.post("/api/trust-paths/rank", async (request, response) => {
 
 app.post("/api/outreach/draft", async (request, response) => {
   const body = request.body as DraftOutreachRequest;
-  if (!body?.target || !body?.selectedPath) {
-    fail(response, 400, "Target and selected real trust path are required before drafting outreach.");
+  if (!body?.selectedJob || !body?.selectedPath) {
+    fail(response, 400, "Selected job and selected real trust path are required before drafting outreach.");
     return;
   }
 
   try {
     const draft = await askJson<OutreachDraft>(
       [
-        "You draft warm professional outreach from real user and public target context.",
+        "You draft warm professional outreach from real user, selected job, and public contact context.",
         "Return only valid JSON with subject, message, followUp.",
-        "The message must be concise, contextual, non-desperate, and must not imply a relationship that was not provided.",
+        "The message must be concise, contextual to the selected job, non-desperate, and must not imply a relationship that was not provided.",
         "Do not ask for a referral too early."
       ].join(" "),
       JSON.stringify(body, null, 2),
@@ -320,6 +443,12 @@ app.post("/api/outreach/draft", async (request, response) => {
   }
 });
 
+app.use(express.static(distPath));
+
+app.get(/^\/(?!api(?:\/|$)).*/, (_request, response) => {
+  response.sendFile(path.join(distPath, "index.html"));
+});
+
 app.listen(port, () => {
-  console.log(`Zo Relationship Mapper live API running on http://localhost:${port}`);
+  console.log(`Zo Relationship Mapper running on http://localhost:${port}`);
 });

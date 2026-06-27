@@ -1,7 +1,9 @@
 import type {
   ApiEnvelope,
-  DiscoverTargetsRequest,
-  DiscoverTargetsResponse,
+  DiscoverJobsRequest,
+  DiscoverJobsResponse,
+  DiscoverPeopleRequest,
+  DiscoverPeopleResponse,
   DraftOutreachRequest,
   OutreachDraft,
   ParsedProfile,
@@ -10,7 +12,7 @@ import type {
   RankTrustPathsResponse
 } from "../types/api";
 
-const API_BASE_URL = import.meta.env.VITE_API_BASE_URL || "http://localhost:8890";
+const API_BASE_URL = import.meta.env.VITE_API_BASE_URL || "";
 
 async function request<T>(path: string, init?: RequestInit): Promise<ApiEnvelope<T>> {
   const response = await fetch(`${API_BASE_URL}${path}`, {
@@ -42,8 +44,13 @@ export const api = {
       method: "POST",
       body: JSON.stringify(body)
     }),
-  discoverTargets: (body: DiscoverTargetsRequest) =>
-    request<DiscoverTargetsResponse>("/api/targets/discover", {
+  discoverJobs: (body: DiscoverJobsRequest) =>
+    request<DiscoverJobsResponse>("/api/jobs/discover", {
+      method: "POST",
+      body: JSON.stringify(body)
+    }),
+  discoverPeople: (body: DiscoverPeopleRequest) =>
+    request<DiscoverPeopleResponse>("/api/people/discover", {
       method: "POST",
       body: JSON.stringify(body)
     }),

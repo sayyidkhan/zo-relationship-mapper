@@ -1,4 +1,5 @@
 export type Confidence = "high" | "medium" | "low";
+export type ContactType = "hiring_manager" | "mentor" | "colleague";
 
 export type OutcomeState =
   | "not_contacted"
@@ -16,6 +17,21 @@ export interface ParsedProfile {
   proofOfWork: string[];
 }
 
+export interface JobOpportunity {
+  id: string;
+  title: string;
+  company: string;
+  location: string;
+  url: string;
+  source: "exa";
+  snippet: string;
+  fitScore: number;
+  seniority: string;
+  whyThisJob: string;
+  matchSignals: string[];
+  concerns: string[];
+}
+
 export interface DiscoveredPerson {
   id: string;
   name: string;
@@ -23,8 +39,10 @@ export interface DiscoveredPerson {
   company: string;
   url: string;
   source: "exa";
+  contactType: ContactType;
   snippet: string;
   signals: string[];
+  whyTalk: string;
 }
 
 export interface TrustPath {
@@ -55,17 +73,26 @@ export interface ParseProfileRequest {
   profileText: string;
 }
 
-export interface DiscoverTargetsRequest {
-  target: string;
+export interface DiscoverJobsRequest {
   parsedProfile: ParsedProfile;
+  searchFocus?: string;
 }
 
-export interface DiscoverTargetsResponse {
+export interface DiscoverJobsResponse {
+  jobs: JobOpportunity[];
+}
+
+export interface DiscoverPeopleRequest {
+  parsedProfile: ParsedProfile;
+  selectedJob: JobOpportunity;
+}
+
+export interface DiscoverPeopleResponse {
   results: DiscoveredPerson[];
 }
 
 export interface RankTrustPathsRequest {
-  target: string;
+  selectedJob: JobOpportunity;
   parsedProfile: ParsedProfile;
   discoveredPeople: DiscoveredPerson[];
 }
@@ -75,7 +102,7 @@ export interface RankTrustPathsResponse {
 }
 
 export interface DraftOutreachRequest {
-  target: string;
+  selectedJob: JobOpportunity;
   selectedPath: TrustPath;
   parsedProfile?: ParsedProfile;
   tone?: string;
