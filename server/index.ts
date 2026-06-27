@@ -5,15 +5,19 @@ import OpenAI from "openai";
 import path from "node:path";
 import type {
   ApiEnvelope,
+  ContactMethod,
   ContactType,
   DiscoverJobsResponse,
   DiscoverPeopleResponse,
   DiscoveredPerson,
   DraftOutreachRequest,
   JobOpportunity,
+  OutreachChannel,
   OutreachDraft,
   ParsedProfile,
-  RankTrustPathsResponse
+  RankTrustPathsResponse,
+  RefineOutreachRequest,
+  RefineOutreachResponse
 } from "../src/types/api";
 
 type ExaResult = { title?: string; url?: string; text?: string; snippet?: string };
@@ -93,6 +97,33 @@ function normalizeContactType(value: unknown, title = ""): ContactType {
     return "hiring_manager";
   }
   return "colleague";
+}
+
+function normalizeUrl(url: string) {
+  return url.trim().replace(/[?#].*$/, "");
+}
+
+function isLinkedInProfileUrl(url: string) {
+  return /^https?:\/\/([^/]+\.)?linkedin\.com\/in\//i.test(url);
+}
+
+function extractPublicEmail(text: string) {
+  const match = text.match(/[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}/i);
+  if (!match) return undefined;
+  const email = match[0].replace(/[),.;:]+$/, "");
+  const lower = email.toLowerCase();
+  if (lower.includes("example.") || lower.startsWith("noreply@") || lower.startsWith("no-reply@")) return undefined;
+  return email;
+}
+
+function outreachChannelInstruction(channel: OutreachChannel | undefined) {
+  if (channel === "email") {
+    return "The draft is a concise professional email. Include a clear subject. The message should be 90-140 words.";
+  }
+  if (channel === "linkedin_followup") {
+    return "The draft is a LinkedIn follow-up after the person accepts or replies. Keep it warm, specific, and under 700 characters.";
+  }
+  return "The draft is a LinkedIn connection note. Keep it under 280 characters and do not include a subject in the message body.";
 }
 
 function extractJson(text: string): unknown {
@@ -215,8 +246,17 @@ async function normalizeExaPeople(
     index,
     title: result.title || "",
     url: result.url || "",
+    publicEmail: extractPublicEmail(`${result.title || ""} ${result.snippet || ""} ${result.text || ""}`),
     snippet: (result.snippet || result.text || "").replace(/\s+/g, " ").trim().slice(0, 900)
   }));
+  const observedEmails = new Set<string>();
+  const observedEmailsByUrl = new Map<string, string>();
+  for (const result of raw) {
+    if (result.publicEmail) {
+      observedEmails.add(result.publicEmail);
+      observedEmailsByUrl.set(normalizeUrl(result.url), result.publicEmail);
+    }
+  }
 
   const normalized = await askJson<DiscoverPeopleResponse>(
     [
@@ -226,8 +266,9 @@ async function normalizeExaPeople(
       "Prefer hiring managers, team leads, directors, heads, founders, senior ICs who can mentor, and employees doing similar work.",
       "If a result is not clearly a person but still useful, keep it only if it is directly relevant and make the name the public page title.",
       "Return only valid JSON: {\"results\":[...]}.",
-      "Each result must have id, name, title, company, url, source, contactType, snippet, signals, whyTalk.",
+      "Each result must have id, name, title, company, url, profileUrl, linkedinUrl, publicEmail, contactMethods, source, contactType, snippet, signals, whyTalk.",
       "source must be \"exa\". contactType must be one of hiring_manager, mentor, colleague.",
+      "publicEmail must be null/omitted unless the raw Exa result explicitly includes that email. Do not infer or guess email formats.",
       "signals and whyTalk must be grounded in the public result and selected job."
     ].join(" "),
     JSON.stringify({ selectedJob, parsedProfile, rawResults: raw }, null, 2),
@@ -237,18 +278,34 @@ async function normalizeExaPeople(
   return {
     results: normalized.results
       .filter((person) => person.name && person.url)
-      .map((person, index) => ({
-        id: person.id || stableId(person.url || `${person.name}-${index}`),
-        name: person.name,
-        title: person.title || "Public result related to the selected job",
-        company: person.company || selectedJob.company,
-        url: person.url,
-        source: "exa" as const,
-        contactType: normalizeContactType(person.contactType, `${person.title} ${person.snippet}`),
-        snippet: person.snippet || "Public result related to the selected job.",
-        signals: asStringArray(person.signals, ["public result", "job relevance"]).slice(0, 5),
-        whyTalk: person.whyTalk || "Public profile appears relevant to the selected job or company."
-      }))
+      .map((person, index) => {
+        const profileUrl = person.profileUrl || person.url;
+        const normalizedUrl = normalizeUrl(profileUrl);
+        const linkedinUrl = person.linkedinUrl || (isLinkedInProfileUrl(profileUrl) ? profileUrl : undefined);
+        const requestedEmail = person.publicEmail && observedEmails.has(person.publicEmail) ? person.publicEmail : undefined;
+        const publicEmail = requestedEmail || observedEmailsByUrl.get(normalizedUrl);
+        const contactMethods: ContactMethod[] = [
+          linkedinUrl ? "linkedin" : "profile",
+          ...(publicEmail ? (["email"] as ContactMethod[]) : [])
+        ];
+
+        return {
+          id: person.id || stableId(person.url || `${person.name}-${index}`),
+          name: person.name,
+          title: person.title || "Public result related to the selected job",
+          company: person.company || selectedJob.company,
+          url: person.url,
+          profileUrl,
+          linkedinUrl,
+          publicEmail,
+          contactMethods,
+          source: "exa" as const,
+          contactType: normalizeContactType(person.contactType, `${person.title} ${person.snippet}`),
+          snippet: person.snippet || "Public result related to the selected job.",
+          signals: asStringArray(person.signals, ["public result", "job relevance"]).slice(0, 5),
+          whyTalk: person.whyTalk || "Public profile appears relevant to the selected job or company."
+        };
+      })
   };
 }
 
@@ -425,12 +482,18 @@ app.post("/api/outreach/draft", async (request, response) => {
     fail(response, 400, "Selected job and selected real trust path are required before drafting outreach.");
     return;
   }
+  if (body.channel === "email" && !body.selectedPerson?.publicEmail) {
+    fail(response, 400, "A public email is required before drafting an email follow-up.");
+    return;
+  }
 
   try {
+    const channel = body.channel || "linkedin_invite";
     const draft = await askJson<OutreachDraft>(
       [
         "You draft warm professional outreach from real user, selected job, and public contact context.",
         "Return only valid JSON with subject, message, followUp.",
+        outreachChannelInstruction(channel),
         "The message must be concise, contextual to the selected job, non-desperate, and must not imply a relationship that was not provided.",
         "Do not ask for a referral too early."
       ].join(" "),
@@ -440,6 +503,55 @@ app.post("/api/outreach/draft", async (request, response) => {
     response.json(envelope(draft));
   } catch (error) {
     fail(response, 502, error instanceof Error ? error.message : "OpenAI outreach drafting failed.");
+  }
+});
+
+app.post("/api/outreach/refine", async (request, response) => {
+  const body = request.body as RefineOutreachRequest;
+  const instruction = String(body?.instruction ?? "").trim();
+  if (!body?.selectedJob || !body?.selectedPath || !body?.currentDraft || !instruction) {
+    fail(response, 400, "Selected job, selected trust path, current draft, and chat instruction are required before refining outreach.");
+    return;
+  }
+  if (body.channel === "email" && !body.selectedPerson?.publicEmail) {
+    fail(response, 400, "A public email is required before refining an email follow-up.");
+    return;
+  }
+
+  try {
+    const recentMessages = (body.messages || [])
+      .filter((message) => message.content?.trim())
+      .slice(-8);
+    const refined = await askJson<RefineOutreachResponse>(
+      [
+        "You are an outreach editor inside a job relationship mapper.",
+        "Revise the current outreach draft based on the user's latest chat instruction and recent chat context.",
+        "Return only valid JSON with reply and draft.",
+        "draft must include subject, message, followUp.",
+        outreachChannelInstruction(body.channel),
+        "Use only the provided profile, selected job, selected public contact/path, current draft, and chat messages.",
+        "Do not invent relationships, private contact details, insider knowledge, referrals, or claims not provided.",
+        "The reply should briefly state what changed, without extra formatting."
+      ].join(" "),
+      JSON.stringify(
+        {
+          selectedJob: body.selectedJob,
+          selectedPath: body.selectedPath,
+          selectedPerson: body.selectedPerson,
+          parsedProfile: body.parsedProfile,
+          currentDraft: body.currentDraft,
+          messages: recentMessages,
+          instruction,
+          channel: body.channel || "linkedin_invite"
+        },
+        null,
+        2
+      ),
+      30_000
+    );
+    response.json(envelope(refined));
+  } catch (error) {
+    fail(response, 502, error instanceof Error ? error.message : "OpenAI outreach refinement failed.");
   }
 });
 

@@ -20,9 +20,11 @@ import { api } from "./lib/api";
 import type {
   ContactType,
   DiscoveredPerson,
+  DraftChatMessage,
   JobOpportunity,
   OutcomeState,
   OutreachDraft,
+  OutreachChannel,
   ParsedProfile,
   TrustPath
 } from "./types/api";
@@ -46,6 +48,11 @@ const contactGroups: Array<{ type: ContactType; title: string }> = [
   { type: "hiring_manager", title: "Hiring managers" },
   { type: "mentor", title: "Mentors" },
   { type: "colleague", title: "Colleagues in the role" }
+];
+const outreachChannels: Array<{ id: OutreachChannel; label: string }> = [
+  { id: "linkedin_invite", label: "LinkedIn invite" },
+  { id: "linkedin_followup", label: "LinkedIn follow-up" },
+  { id: "email", label: "Email" }
 ];
 
 function readOutcomes(): Record<string, OutcomeState> {
@@ -227,11 +234,19 @@ function OpportunityDrawer({
   ranking,
   generating,
   draft,
+  draftChannel,
+  chatMessages,
+  chatInput,
+  chatting,
   onSelectPerson,
   onRank,
   onOutcome,
   onGenerate,
   onCopy,
+  onCopyProfile,
+  onDraftChannelChange,
+  onChatInput,
+  onSendChat,
   onClose
 }: {
   people: DiscoveredPerson[];
@@ -242,11 +257,19 @@ function OpportunityDrawer({
   ranking: boolean;
   generating: boolean;
   draft: OutreachDraft | null;
+  draftChannel: OutreachChannel;
+  chatMessages: DraftChatMessage[];
+  chatInput: string;
+  chatting: boolean;
   onSelectPerson: (personName: string) => void;
   onRank: () => void;
   onOutcome: (pathId: string, outcome: OutcomeState) => void;
   onGenerate: () => void;
   onCopy: () => void;
+  onCopyProfile: (person: DiscoveredPerson) => void;
+  onDraftChannelChange: (channel: OutreachChannel) => void;
+  onChatInput: (value: string) => void;
+  onSendChat: () => void;
   onClose: () => void;
 }) {
   const groupedPeople = contactGroups.map((group) => ({
@@ -254,6 +277,8 @@ function OpportunityDrawer({
     people: people.filter((person) => person.contactType === group.type)
   }));
   const riskText = selectedPath?.risks[0]?.trim() || "No explicit risk returned for this path.";
+  const selectedPerson = selectedPath ? people.find((person) => person.name === selectedPath.personName) ?? null : null;
+  const emailUnavailable = draftChannel === "email" && !selectedPerson?.publicEmail;
 
   return (
     <div className="opportunity-overlay" role="presentation" onClick={onClose}>
@@ -291,21 +316,36 @@ function OpportunityDrawer({
                   <div className="contact-list">
                     {group.people.length ? (
                       group.people.map((person) => (
-                        <button
+                        <article
                           className={`person-card ${selectedPath?.personName === person.name ? "selected" : ""}`}
                           key={person.id}
-                          onClick={() => onSelectPerson(person.name)}
-                          type="button"
                         >
-                          <span className="identity">
-                            <strong>{person.name}</strong>
-                            <small>{person.title}</small>
-                          </span>
-                          <span className="signals">{person.whyTalk || shortList(person.signals, 2)}</span>
-                          <a href={person.url} onClick={(event) => event.stopPropagation()} rel="noreferrer" target="_blank">
-                            <ExternalLink size={14} />
-                          </a>
-                        </button>
+                          <button className="person-main" onClick={() => onSelectPerson(person.name)} type="button">
+                            <span className="identity">
+                              <strong>{person.name}</strong>
+                              <small>{person.title}</small>
+                            </span>
+                            <span className="signals">{person.whyTalk || shortList(person.signals, 2)}</span>
+                          </button>
+                          <div className="contact-actions">
+                            <a href={person.linkedinUrl || person.profileUrl} rel="noreferrer" target="_blank">
+                              <ExternalLink size={13} />
+                              {person.linkedinUrl ? "LinkedIn" : "Profile"}
+                            </a>
+                            {person.publicEmail ? (
+                              <a href={`mailto:${person.publicEmail}`}>
+                                <ExternalLink size={13} />
+                                Email
+                              </a>
+                            ) : (
+                              <span>No public email</span>
+                            )}
+                            <button onClick={() => onCopyProfile(person)} type="button">
+                              <Clipboard size={13} />
+                              Copy URL
+                            </button>
+                          </div>
+                        </article>
                       ))
                     ) : (
                       <div className="contact-empty">No public match returned.</div>
@@ -380,11 +420,27 @@ function OpportunityDrawer({
               <div className="section-kicker">Outreach draft</div>
               <h3>{selectedPath ? `Message for ${selectedPath.personName}` : "Pick the best contact first"}</h3>
             </div>
-            <button className="ghost-button" disabled={!selectedPath || generating} onClick={onGenerate} type="button">
+            <button className="ghost-button" disabled={!selectedPath || generating || emailUnavailable} onClick={onGenerate} type="button">
               {generating ? <Loader2 className="spin" size={15} /> : <MessageSquare size={15} />}
               Generate
             </button>
           </div>
+          <div className="channel-tabs" aria-label="Outreach channel">
+            {outreachChannels.map((channel) => (
+              <button
+                className={draftChannel === channel.id ? "active" : ""}
+                disabled={channel.id === "email" && !selectedPerson?.publicEmail}
+                key={channel.id}
+                onClick={() => onDraftChannelChange(channel.id)}
+                type="button"
+              >
+                {channel.label}
+              </button>
+            ))}
+          </div>
+          {draftChannel === "email" && !selectedPerson?.publicEmail ? (
+            <div className="channel-note">No public email was found in Exa results for this contact.</div>
+          ) : null}
 
           {draft ? (
             <div className="drawer-draft">
@@ -401,6 +457,46 @@ function OpportunityDrawer({
                 <Clipboard size={15} />
                 Copy draft
               </button>
+              <form
+                className="draft-chat"
+                onSubmit={(event) => {
+                  event.preventDefault();
+                  onSendChat();
+                }}
+              >
+                <div className="draft-chat-head">
+                  <div>
+                    <span>Improve draft</span>
+                    <strong>Chat on this message</strong>
+                  </div>
+                  {chatting ? <Loader2 className="spin" size={17} /> : <MessageSquare size={17} />}
+                </div>
+                <div className="chat-log" aria-live="polite">
+                  {chatMessages.length ? (
+                    chatMessages.map((message, index) => (
+                      <div className={`chat-message ${message.role}`} key={`${message.role}-${index}`}>
+                        <span>{message.role === "user" ? "You" : "Assistant"}</span>
+                        <p>{message.content}</p>
+                      </div>
+                    ))
+                  ) : (
+                    <div className="chat-empty">No revision thread yet.</div>
+                  )}
+                </div>
+                <div className="chat-compose">
+                  <textarea
+                    aria-label="Draft improvement request"
+                    disabled={chatting}
+                    onChange={(event) => onChatInput(event.target.value)}
+                    placeholder="Shorter, warmer, stronger ask..."
+                    value={chatInput}
+                  />
+                  <button className="ghost-button" disabled={chatting || !chatInput.trim()} type="submit">
+                    {chatting ? <Loader2 className="spin" size={15} /> : <ArrowRight size={15} />}
+                    Update
+                  </button>
+                </div>
+              </form>
             </div>
           ) : (
             <div className="empty-state">Generate after a contact is ranked.</div>
@@ -421,9 +517,12 @@ export default function App() {
   const [paths, setPaths] = useState<TrustPath[]>([]);
   const [selectedPathId, setSelectedPathId] = useState<string | null>(null);
   const [draft, setDraft] = useState<OutreachDraft | null>(null);
+  const [draftChannel, setDraftChannel] = useState<OutreachChannel>("linkedin_invite");
+  const [draftChatMessages, setDraftChatMessages] = useState<DraftChatMessage[]>([]);
+  const [draftChatInput, setDraftChatInput] = useState("");
   const [outcomes, setOutcomes] = useState<Record<string, OutcomeState>>(readOutcomes);
   const [notice, setNotice] = useState("Paste a real profile, then find live jobs.");
-  const [loading, setLoading] = useState<"idle" | "parse" | "jobs" | "people" | "rank" | "draft" | "sprint">("idle");
+  const [loading, setLoading] = useState<"idle" | "parse" | "jobs" | "people" | "rank" | "draft" | "chat" | "sprint">("idle");
 
   useEffect(() => {
     localStorage.setItem("zo.relationship.outcomes", JSON.stringify(outcomes));
@@ -442,11 +541,17 @@ export default function App() {
   const activeStep = draft ? 4 : paths.length ? 3 : selectedJob ? 2 : jobs.length ? 1 : 0;
   const isBusy = loading !== "idle";
 
+  function resetDraftChat() {
+    setDraftChatMessages([]);
+    setDraftChatInput("");
+  }
+
   function resetDownstream() {
     setPeople([]);
     setPaths([]);
     setSelectedPathId(null);
     setDraft(null);
+    resetDraftChat();
   }
 
   async function parseProfile() {
@@ -516,6 +621,7 @@ export default function App() {
       setPaths([]);
       setSelectedPathId(null);
       setDraft(null);
+      resetDraftChat();
       setNotice(
         result.data.results.length
           ? `People discovery complete. ${apiStatus(result.reason)}`
@@ -542,6 +648,8 @@ export default function App() {
       setPaths(result.data.paths);
       setSelectedPathId(result.data.paths[0]?.id ?? null);
       setDraft(null);
+      setDraftChannel("linkedin_invite");
+      resetDraftChat();
       setNotice(`Contacts ranked. ${apiStatus(result.reason)}`);
       return result.data.paths;
     } catch (error) {
@@ -554,20 +662,63 @@ export default function App() {
 
   async function generateDraft(path = selectedPath, job = selectedJob) {
     if (!path || !job) return null;
+    const selectedPerson = people.find((person) => person.name === path.personName) ?? null;
+    if (draftChannel === "email" && !selectedPerson?.publicEmail) {
+      setNotice("No public email was found for this contact. Use a LinkedIn draft instead.");
+      return null;
+    }
     setLoading("draft");
     try {
       const result = await api.draftOutreach({
         selectedJob: job,
         parsedProfile: parsedProfile ?? undefined,
         selectedPath: path,
-        tone: "warm, concise, non-desperate"
+        selectedPerson: selectedPerson ?? undefined,
+        tone: "warm, concise, non-desperate",
+        channel: draftChannel
       });
       setDraft(result.data);
+      resetDraftChat();
       setNotice(`Draft ready. ${apiStatus(result.reason)}`);
       return result.data;
     } catch (error) {
       setNotice(`Drafting failed: ${errorMessage(error)}`);
       return null;
+    } finally {
+      setLoading("idle");
+    }
+  }
+
+  async function sendDraftChat() {
+    const instruction = draftChatInput.trim();
+    if (!instruction) return;
+    if (!draft || !selectedJob || !selectedPath) {
+      setNotice("Generate a draft before refining it.");
+      return;
+    }
+
+    const selectedPerson = people.find((person) => person.name === selectedPath.personName) ?? null;
+    const nextMessages: DraftChatMessage[] = [...draftChatMessages, { role: "user", content: instruction }];
+    setDraftChatMessages(nextMessages);
+    setDraftChatInput("");
+    setLoading("chat");
+
+    try {
+      const result = await api.refineOutreach({
+        selectedJob,
+        parsedProfile: parsedProfile ?? undefined,
+        selectedPath,
+        selectedPerson: selectedPerson ?? undefined,
+        currentDraft: draft,
+        messages: nextMessages,
+        instruction,
+        channel: draftChannel
+      });
+      setDraft(result.data.draft);
+      setDraftChatMessages([...nextMessages, { role: "assistant", content: result.data.reply }]);
+      setNotice(`Draft updated. ${apiStatus(result.reason)}`);
+    } catch (error) {
+      setNotice(`Draft chat failed: ${errorMessage(error)}`);
     } finally {
       setLoading("idle");
     }
@@ -608,6 +759,7 @@ export default function App() {
     const job = jobs.find((item) => item.id === jobId) ?? null;
     setSelectedJobId(jobId);
     resetDownstream();
+    setDraftChannel("linkedin_invite");
     if (job) {
       setNotice(`${job.company} selected. Finding contacts for this opportunity...`);
       void discoverPeople(job, parsedProfile);
@@ -617,12 +769,17 @@ export default function App() {
   function closeOpportunity() {
     setSelectedJobId(null);
     resetDownstream();
+    setDraftChannel("linkedin_invite");
     setNotice("Opportunity closed. Select another ranked job to inspect contacts.");
   }
 
   function selectPerson(personName: string) {
     const matchingPath = paths.find((path) => path.personName === personName);
-    if (matchingPath) setSelectedPathId(matchingPath.id);
+    if (matchingPath) {
+      setSelectedPathId(matchingPath.id);
+      setDraft(null);
+      resetDraftChat();
+    }
   }
 
   function updateOutcome(pathId: string, outcome: OutcomeState) {
@@ -633,6 +790,17 @@ export default function App() {
     if (!draft) return;
     await navigator.clipboard.writeText(`${draft.subject}\n\n${draft.message}\n\nFollow-up: ${draft.followUp}`);
     setNotice("Draft copied.");
+  }
+
+  async function copyProfile(person: DiscoveredPerson) {
+    await navigator.clipboard.writeText(person.linkedinUrl || person.profileUrl);
+    setNotice(`${person.name}'s profile URL copied.`);
+  }
+
+  function changeDraftChannel(channel: OutreachChannel) {
+    setDraftChannel(channel);
+    setDraft(null);
+    resetDraftChat();
   }
 
   return (
@@ -697,7 +865,11 @@ export default function App() {
 
       {selectedJob ? (
         <OpportunityDrawer
+          chatInput={draftChatInput}
+          chatMessages={draftChatMessages}
+          chatting={loading === "chat"}
           draft={draft}
+          draftChannel={draftChannel}
           generating={loading === "draft"}
           loading={loading === "people"}
           outcomes={outcomes}
@@ -705,11 +877,15 @@ export default function App() {
           ranking={loading === "rank"}
           selectedJob={selectedJob}
           selectedPath={selectedPath}
+          onChatInput={setDraftChatInput}
           onClose={closeOpportunity}
           onCopy={copyDraft}
+          onCopyProfile={copyProfile}
+          onDraftChannelChange={changeDraftChannel}
           onGenerate={() => generateDraft()}
           onOutcome={updateOutcome}
           onRank={() => rankPaths()}
+          onSendChat={sendDraftChat}
           onSelectPerson={selectPerson}
         />
       ) : null}

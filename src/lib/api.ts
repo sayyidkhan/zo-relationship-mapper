@@ -9,7 +9,9 @@ import type {
   ParsedProfile,
   ParseProfileRequest,
   RankTrustPathsRequest,
-  RankTrustPathsResponse
+  RankTrustPathsResponse,
+  RefineOutreachRequest,
+  RefineOutreachResponse
 } from "../types/api";
 
 const API_BASE_URL = import.meta.env.VITE_API_BASE_URL || "";
@@ -61,6 +63,11 @@ export const api = {
     }),
   draftOutreach: (body: DraftOutreachRequest) =>
     request<OutreachDraft>("/api/outreach/draft", {
+      method: "POST",
+      body: JSON.stringify(body)
+    }),
+  refineOutreach: (body: RefineOutreachRequest) =>
+    request<RefineOutreachResponse>("/api/outreach/refine", {
       method: "POST",
       body: JSON.stringify(body)
     })
