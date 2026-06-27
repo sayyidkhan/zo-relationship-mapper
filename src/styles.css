@@ -562,14 +562,15 @@ textarea {
 }
 
 .opportunity-drawer {
-  display: grid;
-  grid-template-rows: auto minmax(0, 1fr);
-  align-content: start;
-  gap: 0;
   width: min(680px, calc(100vw - 42px));
-  height: calc(100vh - 28px);
+  height: calc(100dvh - 28px);
+  max-height: calc(100vh - 28px);
   margin: 14px;
-  overflow: auto;
+  overflow-x: hidden;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  -webkit-overflow-scrolling: touch;
+  scrollbar-gutter: stable;
   border: 1px solid var(--line);
   border-radius: 8px;
   background: var(--canvas);
@@ -606,7 +607,7 @@ textarea {
 
 .drawer-section {
   margin: 14px;
-  overflow: hidden;
+  overflow: visible;
   border: 1px solid var(--line);
   border-radius: 8px;
   background: rgba(255, 255, 255, 0.82);
