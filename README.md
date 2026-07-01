@@ -214,6 +214,7 @@ Optional:
 | `OPENAI_MODEL` | `gpt-4o-mini` | OpenAI model used by the backend |
 | `API_PORT` | `8890` | Local API port when `PORT` is not provided |
 | `PORT` | unset | Production platform port override |
+| `APP_BASE_PATH` | empty | Optional reverse-proxy mount path, e.g. `/mapper` |
 | `VITE_API_BASE_URL` | empty in production | Frontend API base URL. Use `http://localhost:8890` for split local dev |
 
 Never commit `.env`.
@@ -381,6 +382,8 @@ VITE_API_BASE_URL=http://localhost:8890
 ```
 
 For production, leave `VITE_API_BASE_URL` empty so the frontend calls the same deployed origin.
+
+If you later place the app behind a public gateway path, set `APP_BASE_PATH=/mapper` before building so the SPA assets, API calls, and Express routes all stay prefix-aware.
 
 ## Hackathon Notes
 

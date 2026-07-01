@@ -30,6 +30,23 @@ const openai = process.env.OPENAI_API_KEY ? new OpenAI({ apiKey: process.env.OPE
 const openaiModel = process.env.OPENAI_MODEL || "gpt-4o-mini";
 const distPath = path.resolve(process.cwd(), "dist");
 
+function normalizeBasePath(value: string | undefined) {
+  const raw = value?.trim();
+  if (!raw || raw === "/") return "";
+  const withLeadingSlash = raw.startsWith("/") ? raw : `/${raw}`;
+  return withLeadingSlash.replace(/\/+$/, "");
+}
+
+function withBasePath(basePath: string, routePath: string) {
+  return basePath ? `${basePath}${routePath}` : routePath;
+}
+
+function escapeRegex(value: string) {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+const appBasePath = normalizeBasePath(process.env.APP_BASE_PATH);
+
 app.use(cors());
 app.use(express.json({ limit: "2mb" }));
 app.use((error: unknown, _request: express.Request, response: express.Response, next: express.NextFunction) => {
@@ -345,7 +362,7 @@ async function normalizeExaPeople(
   };
 }
 
-app.get("/api/health", (_request, response) => {
+app.get(withBasePath(appBasePath, "/api/health"), (_request, response) => {
   response.json({
     ok: true,
     service: "zo-relationship-mapper",
@@ -355,7 +372,7 @@ app.get("/api/health", (_request, response) => {
   });
 });
 
-app.post("/api/profile/parse", async (request, response) => {
+app.post(withBasePath(appBasePath, "/api/profile/parse"), async (request, response) => {
   const profileText = String(request.body?.profileText ?? "").trim();
   if (!profileText) {
     fail(response, 400, "Paste a real resume or profile before parsing.");
@@ -378,7 +395,7 @@ app.post("/api/profile/parse", async (request, response) => {
   }
 });
 
-app.post("/api/jobs/discover", async (request, response) => {
+app.post(withBasePath(appBasePath, "/api/jobs/discover"), async (request, response) => {
   const searchFocus = String(request.body?.searchFocus ?? "").trim();
   const parsedProfile = request.body?.parsedProfile as ParsedProfile | undefined;
 
@@ -434,7 +451,7 @@ app.post("/api/jobs/discover", async (request, response) => {
   }
 });
 
-app.post("/api/people/discover", async (request, response) => {
+app.post(withBasePath(appBasePath, "/api/people/discover"), async (request, response) => {
   const selectedJob = request.body?.selectedJob as JobOpportunity | undefined;
   const parsedProfile = request.body?.parsedProfile as ParsedProfile | undefined;
 
@@ -484,7 +501,7 @@ app.post("/api/people/discover", async (request, response) => {
   }
 });
 
-app.post("/api/trust-paths/rank", async (request, response) => {
+app.post(withBasePath(appBasePath, "/api/trust-paths/rank"), async (request, response) => {
   const selectedJob = request.body?.selectedJob as JobOpportunity | undefined;
   const parsedProfile = request.body?.parsedProfile as ParsedProfile | undefined;
   const discoveredPeople = (request.body?.discoveredPeople ?? []) as DiscoveredPerson[];
@@ -512,7 +529,7 @@ app.post("/api/trust-paths/rank", async (request, response) => {
   }
 });
 
-app.post("/api/outreach/draft", async (request, response) => {
+app.post(withBasePath(appBasePath, "/api/outreach/draft"), async (request, response) => {
   const body = request.body as DraftOutreachRequest;
   if (!body?.selectedJob || !body?.selectedPath) {
     fail(response, 400, "Selected job and selected real trust path are required before drafting outreach.");
@@ -542,7 +559,7 @@ app.post("/api/outreach/draft", async (request, response) => {
   }
 });
 
-app.post("/api/outreach/refine", async (request, response) => {
+app.post(withBasePath(appBasePath, "/api/outreach/refine"), async (request, response) => {
   const body = request.body as RefineOutreachRequest;
   const instruction = String(body?.instruction ?? "").trim();
   if (!body?.selectedJob || !body?.selectedPath || !body?.currentDraft || !instruction) {
@@ -591,12 +608,23 @@ app.post("/api/outreach/refine", async (request, response) => {
   }
 });
 
-app.use(express.static(distPath));
+if (appBasePath) {
+  app.get("/", (_request, response) => {
+    response.redirect(appBasePath);
+  });
+}
 
-app.get(/^\/(?!api(?:\/|$)).*/, (_request, response) => {
-  response.sendFile(path.join(distPath, "index.html"));
-});
+app.use(appBasePath || "/", express.static(distPath));
+
+app.get(
+  appBasePath
+    ? new RegExp(`^${escapeRegex(appBasePath)}(?:/(?!api(?:/|$)).*)?$`)
+    : /^\/(?!api(?:\/|$)).*/,
+  (_request, response) => {
+    response.sendFile(path.join(distPath, "index.html"));
+  }
+);
 
 app.listen(port, () => {
-  console.log(`Zo Relationship Mapper running on http://localhost:${port}`);
+  console.log(`Zo Relationship Mapper running on http://localhost:${port}${appBasePath || ""}`);
 });

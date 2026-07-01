@@ -14,10 +14,22 @@ import type {
   RefineOutreachResponse
 } from "../types/api";
 
-const API_BASE_URL = import.meta.env.VITE_API_BASE_URL || "";
+function normalizeBaseUrl(value: string | undefined): string {
+  const raw = value?.trim();
+  if (!raw || raw === "/") {
+    return "";
+  }
+  return raw.replace(/\/+$/, "");
+}
+
+function joinBaseUrl(baseUrl: string, path: string): string {
+  return baseUrl ? `${baseUrl}${path}` : path;
+}
+
+const API_BASE_URL = normalizeBaseUrl(import.meta.env.VITE_API_BASE_URL || import.meta.env.BASE_URL);
 
 async function request<T>(path: string, init?: RequestInit): Promise<ApiEnvelope<T>> {
-  const response = await fetch(`${API_BASE_URL}${path}`, {
+  const response = await fetch(joinBaseUrl(API_BASE_URL, path), {
     headers: {
       "Content-Type": "application/json",
       ...(init?.headers ?? {})

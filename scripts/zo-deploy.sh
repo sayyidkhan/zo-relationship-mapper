@@ -18,6 +18,7 @@ if [ ! -f .env ]; then
 fi
 
 npm ci
+export APP_BASE_PATH="${APP_BASE_PATH:-}"
 export VITE_API_BASE_URL="${VITE_API_BASE_URL:-}"
 npm run build
 
